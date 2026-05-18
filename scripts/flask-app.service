@@ -1,0 +1,24 @@
+[Unit]
+Description=Flask CI/CD Application Container
+# Docker service ke baad start ho
+After=docker.service
+Requires=docker.service
+
+[Service]
+# Restart policy: agar container crash ho toh automatically restart karo
+Restart=always
+RestartSec=10
+
+# Container start karne ka command
+# flask-blue default hai — deploy.sh baad me manage karega
+ExecStart=/usr/bin/docker start -a flask-blue
+
+# Container stop karne ka command (systemctl stop pe)
+ExecStop=/usr/bin/docker stop flask-blue
+
+# Agar container nahi mila toh bhi fail mat karo
+ExecStartPre=-/usr/bin/docker rm -f flask-blue
+
+[Install]
+# Multi-user target pe enable karo (normal boot)
+WantedBy=multi-user.target

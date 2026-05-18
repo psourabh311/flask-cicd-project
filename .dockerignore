@@ -1,0 +1,22 @@
+# .dockerignore — Docker build context se ye files exclude hongi
+# WHY zaroori hai: docker build ke time poora folder Docker daemon ko bheja jaata hai
+# Agar venv/ include ho gayi toh 200MB+ unnecessary data transfer hoga
+# Ye file .gitignore jaisi hai but Docker ke liye
+
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.git/
+.gitignore
+*.md
+*.log
+.env
+.env.*
+nginx/
+scripts/
+.github/
