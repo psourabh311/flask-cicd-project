@@ -128,7 +128,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: IMAGE_TAG
           script: |
             # EC2 pe ye commands chalenge
             
