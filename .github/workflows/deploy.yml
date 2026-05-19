@@ -145,16 +145,20 @@ jobs:
       # Deploy ke baad health check karo confirm karne ke liye
       - name: Verify deployment
         run: |
-          echo "Waiting 10 seconds for deployment to stabilize..."
-          sleep 10
+          echo "Waiting 20 seconds for deployment to stabilize..."
+          sleep 20
           
           # EC2 ka health endpoint check karo
+          # --max-time 30: 30 second timeout
+          # --retry 3: 3 baar try karo
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 --retry 3 --retry-delay 5 \
             http://${{ secrets.EC2_HOST }}/health)
           
           if [ "$HTTP_STATUS" = "200" ]; then
             echo "✅ Deployment successful! Health check passed."
           else
             echo "❌ Deployment verification failed! HTTP Status: ${HTTP_STATUS}"
+            echo "Check EC2 Security Group — port 80 open hona chahiye"
             exit 1
           fi
