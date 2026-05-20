@@ -22,7 +22,7 @@ APP_VERSION = os.environ.get('APP_VERSION', 'v1.0.0')
 def home():
     logger.info("Home endpoint hit")
     return jsonify({
-        'message': 'Hello Sourabh! Your Flask CI/CD App is running! - Deployed via GitHub Actions 🚀',
+        'message': 'Flask CI/CD App is running! - Deployed via GitHub Actions 🚀',
         'version': APP_VERSION,
         'status': 'success'
     }), 200
