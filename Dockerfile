@@ -1,71 +1,65 @@
-# ============================================================
-# STAGE 1: Builder
-# Kaam: Dependencies install karna
-# Ye stage final image me NAHI aayegi — sirf build ke liye hai
-# ============================================================
+# =============================================================
+# Multi-Stage Dockerfile
+# Stage 1 (builder): installs dependencies
+# Stage 2 (runtime): copies only what is needed to run the app
+# Result: final image is ~150MB instead of ~800MB
+# =============================================================
+
+# Stage 1 — Builder
+# This stage is discarded after the build. It exists only to
+# install packages so that build tools and pip cache do not
+# end up in the final image.
 FROM python:3.11-slim AS builder
 
-# WORKDIR — container ke andar working directory set karo
-# Iske baad ke saare commands is folder me chalenge
-# /app standard convention hai
 WORKDIR /app
 
-# requirements.txt PEHLE copy karo — code se pehle
-# WHY? Docker layer caching ki wajah se
-# Agar requirements.txt nahi badla toh pip install dobara nahi chalega
-# Sirf code change hone pe sirf code layer rebuild hogi — fast builds!
+# Copy requirements first to leverage Docker layer caching.
+# If requirements.txt has not changed, pip install is skipped
+# on subsequent builds — significantly faster CI builds.
 COPY requirements.txt .
 
-# Dependencies install karo
-# --no-cache-dir: pip ka cache mat rakho — image size kam hogi
-# --upgrade pip: latest pip use karo
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# ============================================================
-# STAGE 2: Runtime (Final Image)
-# Kaam: Sirf app run karna
-# Builder se sirf installed packages copy karenge
-# Build tools, pip cache, etc. yahan NAHI aayenge
-# ============================================================
+# Stage 2 — Runtime (final image)
+# Only the installed packages and application code are copied here.
+# Build tools, pip cache, and compiler dependencies are excluded.
 FROM python:3.11-slim AS runtime
 
-# Security best practice: root user mat use karo
-# Agar container compromise ho jaaye toh attacker root nahi milega
+# Run as a non-root user — security best practice.
+# If the container is compromised, the attacker does not get root.
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 WORKDIR /app
 
-# Builder stage se sirf installed Python packages copy karo
-# /usr/local/lib/python3.11/site-packages me packages hote hain
+# Copy installed Python packages from the builder stage
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/gunicorn /usr/local/bin/gunicorn
 
-# App ka code copy karo
+# Copy application source code
 COPY app/ .
 
-# Files ka ownership appuser ko do
+# Transfer ownership to the non-root user
 RUN chown -R appuser:appuser /app
 
-# Non-root user pe switch karo
 USER appuser
 
-# EXPOSE — documentation ke liye hai
-# Ye actually port open nahi karta — docker run -p karta hai
-# Lekin ye batata hai ki app is port pe listen karta hai
+# EXPOSE is documentation — it does not publish the port.
+# The actual port mapping is done with docker run -p.
 EXPOSE 5000
 
-# Health check — Docker khud container ki health monitor karega
-# --interval=30s: har 30 second me check karo
-# --timeout=10s: 10 second me response nahi aaya toh fail
-# --start-period=5s: container start hone ke baad 5 sec wait karo
-# --retries=3: 3 baar fail hone pe container "unhealthy" mark hoga
+# Docker-native health check
+# --interval=30s  : check every 30 seconds
+# --timeout=10s   : fail if no response within 10 seconds
+# --start-period=5s: allow 5 seconds for the app to start
+# --retries=3     : mark container unhealthy after 3 failures
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
 
-# CMD — container start hone pe ye command chalegi
-# Gunicorn: production-grade WSGI server
-# -w 2: 2 worker processes (t2.micro ke liye 2 enough hai)
-# -b 0.0.0.0:5000: sab interfaces pe port 5000 pe bind karo
-# app:app — pehla 'app' module name (app.py), doosra 'app' Flask instance variable
+# Start Gunicorn with 2 workers — appropriate for t2.micro
+# -w 2              : 2 worker processes
+# -b 0.0.0.0:5000   : bind to all interfaces on port 5000
+# --access-logfile - : write access logs to stdout (captured by Docker)
+# --error-logfile -  : write error logs to stderr (captured by Docker)
+# app:app           : module 'app', Flask instance variable 'app'
 CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "--access-logfile", "-", "--error-logfile", "-", "app:app"]

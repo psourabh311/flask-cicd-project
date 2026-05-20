@@ -1,30 +1,26 @@
 #!/bin/bash
 # =============================================================
 # Zero-Downtime Deployment Script
-# Strategy: Blue-Green on single EC2
-# 
-# Kaise kaam karta hai:
-# 1. Pata karo kaunsa container chal raha hai (blue=5000 ya green=5001)
-# 2. Doosre port pe naya container start karo
-# 3. Health check karo — ready hone ka wait karo
-# 4. Nginx config update karo naye port pe
-# 5. Purana container band karo
+# Strategy: Blue-Green on a single EC2 instance
+#
+# Flow:
+# 1. Detect which container is currently active (blue=5000 / green=5001)
+# 2. Start the new container on the alternate port
+# 3. Poll /health until the new container is ready
+# 4. Update Nginx upstream to point to the new port
+# 5. Stop and remove the old container
 # =============================================================
 
-# set -e: Koi bhi command fail hote hi script band ho jaaye
-# Bina iske agar health check fail ho toh script aage badhti rehti
-# aur broken container pe traffic switch ho jaata — DANGEROUS
+# Exit immediately if any command fails.
+# Without this, a failed health check would not stop the script,
+# and Nginx could switch traffic to a broken container.
 set -e
 
-# trap: Agar script kisi bhi wajah se fail ho (set -e ki wajah se)
-# toh ye cleanup function chalega
-# Ye ensure karta hai ki failure pe purana container band nahi hoga
-trap 'echo "DEPLOYMENT FAILED! Old container still running. No downtime occurred."; exit 1' ERR
+# If the script exits due to set -e, print a failure message.
+# The old container remains running — no downtime occurs.
+trap 'echo "DEPLOYMENT FAILED. Old container is still running. No downtime occurred."; exit 1' ERR
 
-# ============================================================
-# CONFIGURATION — Ye values GitHub Actions se environment
-# variables ke through aayengi
-# ============================================================
+# Configuration
 IMAGE_NAME="${DOCKER_USERNAME:-myusername}/flask-cicd-app"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 FULL_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
@@ -38,15 +34,11 @@ echo "Starting Zero-Downtime Deployment"
 echo "Image: ${FULL_IMAGE}"
 echo "============================================"
 
-# ============================================================
-# STEP 1: Kaunsa container currently chal raha hai?
-# ============================================================
-# docker ps se check karo kaunsa container active hai
+# Detect which container is currently active
 BLUE_RUNNING=$(docker ps --filter "name=flask-blue" --filter "status=running" -q)
 GREEN_RUNNING=$(docker ps --filter "name=flask-green" --filter "status=running" -q)
 
 if [ -n "$BLUE_RUNNING" ]; then
-    # Blue chal raha hai, toh green pe deploy karenge
     CURRENT_COLOR="blue"
     CURRENT_PORT=$BLUE_PORT
     NEW_COLOR="green"
@@ -54,7 +46,6 @@ if [ -n "$BLUE_RUNNING" ]; then
     CURRENT_CONTAINER="flask-blue"
     NEW_CONTAINER="flask-green"
 elif [ -n "$GREEN_RUNNING" ]; then
-    # Green chal raha hai, toh blue pe deploy karenge
     CURRENT_COLOR="green"
     CURRENT_PORT=$GREEN_PORT
     NEW_COLOR="blue"
@@ -62,8 +53,7 @@ elif [ -n "$GREEN_RUNNING" ]; then
     CURRENT_CONTAINER="flask-green"
     NEW_CONTAINER="flask-blue"
 else
-    # Pehli baar deploy ho raha hai — koi container nahi chal raha
-    echo "First deployment — no existing container found"
+    echo "No existing container found — this is the first deployment."
     CURRENT_COLOR="none"
     NEW_COLOR="blue"
     NEW_PORT=$BLUE_PORT
@@ -71,27 +61,20 @@ else
     CURRENT_CONTAINER=""
 fi
 
-echo "Current: ${CURRENT_COLOR} | Deploying to: ${NEW_COLOR} (port ${NEW_PORT})"
+echo "Active: ${CURRENT_COLOR} | Deploying to: ${NEW_COLOR} (port ${NEW_PORT})"
 
-# ============================================================
-# STEP 2: Latest image pull karo Docker Hub se
-# ============================================================
-echo "Pulling latest image: ${FULL_IMAGE}"
+# Pull the latest image from Docker Hub
+echo "Pulling image: ${FULL_IMAGE}"
 docker pull "${FULL_IMAGE}"
 
-# ============================================================
-# STEP 3: Agar purana same-name container hai toh hatao
-# (stopped state me ho sakta hai)
-# ============================================================
+# Remove any stopped container with the same name
 if docker ps -a --filter "name=${NEW_CONTAINER}" -q | grep -q .; then
-    echo "Removing old stopped container: ${NEW_CONTAINER}"
+    echo "Removing stopped container: ${NEW_CONTAINER}"
     docker rm -f "${NEW_CONTAINER}" || true
 fi
 
-# ============================================================
-# STEP 4: Naya container start karo NEW_PORT pe
-# ============================================================
-echo "Starting new container: ${NEW_CONTAINER} on port ${NEW_PORT}"
+# Start the new container on the alternate port
+echo "Starting container: ${NEW_CONTAINER} on port ${NEW_PORT}"
 docker run -d \
     --name "${NEW_CONTAINER}" \
     --restart unless-stopped \
@@ -99,71 +82,54 @@ docker run -d \
     -e "APP_VERSION=${IMAGE_TAG}" \
     "${FULL_IMAGE}"
 
-# ============================================================
-# STEP 5: Health check — container ready hone ka wait karo
-# Ye SABSE IMPORTANT step hai zero-downtime ke liye
-# ============================================================
-echo "Waiting for new container to be healthy..."
-MAX_RETRIES=30      # 30 baar try karo
-RETRY_INTERVAL=2    # har 2 second me
+# Poll /health until the new container is ready
+# This is the core of zero-downtime — Nginx is not switched until
+# the new container confirms it is ready to serve traffic.
+echo "Waiting for new container to pass health check..."
+MAX_RETRIES=30
+RETRY_INTERVAL=2
 RETRIES=0
 
 until curl -sf "http://localhost:${NEW_PORT}/health" > /dev/null 2>&1; do
     RETRIES=$((RETRIES + 1))
     if [ $RETRIES -ge $MAX_RETRIES ]; then
-        echo "ERROR: Health check failed after ${MAX_RETRIES} attempts!"
-        echo "New container is NOT healthy. Removing it..."
+        echo "ERROR: Health check failed after ${MAX_RETRIES} attempts."
+        echo "Removing unhealthy container: ${NEW_CONTAINER}"
         docker rm -f "${NEW_CONTAINER}"
-        echo "Old container (${CURRENT_CONTAINER}) is still running. No downtime!"
-        exit 1  # trap chalega yahan
+        echo "Old container (${CURRENT_CONTAINER}) is still serving traffic."
+        exit 1
     fi
-    echo "Health check attempt ${RETRIES}/${MAX_RETRIES} — waiting..."
+    echo "Attempt ${RETRIES}/${MAX_RETRIES} — retrying in ${RETRY_INTERVAL}s..."
     sleep $RETRY_INTERVAL
 done
 
-echo "New container is HEALTHY!"
+echo "New container is healthy."
 
-# ============================================================
-# STEP 6: Nginx config update karo — traffic switch karo
-# sed command se port replace karo nginx config me
-# ============================================================
+# Switch Nginx upstream to the new port
+# nginx reload is graceful — in-flight requests are completed before switching
 echo "Switching Nginx traffic to port ${NEW_PORT}..."
-
-# Nginx config me upstream port update karo
-sudo sed -i "s/server 127.0.0.1:[0-9]*/server 127.0.0.1:${NEW_PORT}/" "${NGINX_CONF}"
-
-# Nginx config test karo — galat config se Nginx crash ho sakta hai
+sudo sed -i "s/server 127\.0\.0\.1:[0-9]*/server 127.0.0.1:${NEW_PORT}/" "${NGINX_CONF}"
 sudo nginx -t
-
-# Nginx reload karo — reload graceful hota hai, restart nahi
-# Reload me existing connections drop nahi hote — TRUE zero downtime
 sudo systemctl reload nginx
+echo "Nginx switched to port ${NEW_PORT}."
 
-echo "Nginx switched to port ${NEW_PORT}"
-
-# ============================================================
-# STEP 7: Purana container band karo
-# Ye tabhi hoga jab naya container healthy ho aur Nginx switch ho chuka ho
-# ============================================================
+# Stop and remove the old container
 if [ -n "$CURRENT_CONTAINER" ] && [ "$CURRENT_COLOR" != "none" ]; then
     echo "Stopping old container: ${CURRENT_CONTAINER}"
     docker stop "${CURRENT_CONTAINER}"
     docker rm "${CURRENT_CONTAINER}"
-    echo "Old container removed"
 fi
 
-# ============================================================
-# STEP 8: Purani images clean karo (disk space bachao)
-# ============================================================
-echo "Cleaning up old Docker images..."
+# Remove unused images to free disk space
+echo "Pruning unused Docker images..."
 docker image prune -f
 
 echo "============================================"
-echo "DEPLOYMENT SUCCESSFUL!"
-echo "Active container: ${NEW_CONTAINER} on port ${NEW_PORT}"
-echo "Image deployed: ${FULL_IMAGE}"
+echo "DEPLOYMENT SUCCESSFUL"
+echo "Active container : ${NEW_CONTAINER}"
+echo "Port             : ${NEW_PORT}"
+echo "Image            : ${FULL_IMAGE}"
 echo "============================================"
 
-# Verify karo
 curl -s "http://localhost:${NEW_PORT}/version"
 echo ""

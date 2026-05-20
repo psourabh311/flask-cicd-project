@@ -2,8 +2,8 @@ import os
 import logging
 from flask import Flask, jsonify
 
-# Logging setup — production me logs structured hone chahiye
-# Ye logs Docker ke through CloudWatch ya any log aggregator me jaate hain
+# Configure structured logging for production
+# Logs are consumed by Docker and forwarded to CloudWatch or any log aggregator
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -12,17 +12,17 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# APP_VERSION env variable se aata hai
-# CI/CD pipeline me hum git commit SHA inject karenge yahan
-# Isse pata chalega ki exactly kaunsa commit deploy hua hai
+# APP_VERSION is injected as an environment variable during deployment
+# The CI/CD pipeline sets this to the git commit SHA
+# This allows verifying exactly which commit is running in production
 APP_VERSION = os.environ.get('APP_VERSION', 'v1.0.0')
 
 
 @app.route('/')
 def home():
-    logger.info("Home endpoint hit")
+    logger.info("Home endpoint called")
     return jsonify({
-        'message': 'Flask CI/CD App is running! - Deployed via GitHub Actions 🚀',
+        'message': 'Flask CI/CD App is running! - Deployed via GitHub Actions',
         'version': APP_VERSION,
         'status': 'success'
     }), 200
@@ -30,15 +30,16 @@ def home():
 
 @app.route('/health')
 def health():
-    # YE ENDPOINT SABSE IMPORTANT HAI
-    # Zero-downtime deployment me kya hota hai:
-    # 1. Naya container start karo
-    # 2. /health ko curl karo — agar 200 aaya toh container ready hai
-    # 3. Tabhi Nginx ka traffic naye container pe switch karo
-    # 4. Purana container band karo
-    # Agar /health nahi hota toh hume pata nahi chalta container ready hai ya nahi
-    # Users ko errors milte jab tak container fully start nahi hota
-    logger.info("Health check hit")
+    # Health check endpoint — critical for zero-downtime deployment
+    #
+    # How it is used in the deployment flow:
+    # 1. New container starts on an alternate port
+    # 2. deploy.sh polls this endpoint every 2 seconds
+    # 3. Only after receiving HTTP 200 does Nginx switch traffic
+    # 4. Old container is stopped after the switch
+    #
+    # This guarantees no traffic is sent to a container that is not ready
+    logger.info("Health check called")
     return jsonify({
         'status': 'healthy',
         'version': APP_VERSION
@@ -47,13 +48,13 @@ def health():
 
 @app.route('/version')
 def version():
-    # Deployment ke baad verify karne ke liye
-    # curl http://your-server/version se pata chalega kaunsa version live hai
+    # Used to verify which version is live after a deployment
+    # curl http://<server>/version returns the deployed git SHA
     return jsonify({'version': APP_VERSION}), 200
 
 
 if __name__ == '__main__':
-    # host='0.0.0.0' — Docker ke liye ZAROORI hai
-    # Agar '127.0.0.1' diya toh container ke bahar se access nahi hoga
-    # kyunki Docker container ka apna network namespace hota hai
+    # host='0.0.0.0' is required inside Docker
+    # Without it the app binds to 127.0.0.1 which is only reachable
+    # inside the container — port mapping would not work
     app.run(host='0.0.0.0', port=5000, debug=False)
